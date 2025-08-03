@@ -9,7 +9,8 @@ await $.exportConfig({
 });
 
 // FIRST COURSE OF ACTION: init character stuff
-let fontFile = fs.readFileSync('ib8x8u.bdf').toString();
+// load IBM 8x16 VGA font
+let fontFile = fs.readFileSync('iv8x16u.bdf').toString();
 
 let currFont = {};
 let fonts = [];
@@ -17,18 +18,18 @@ let isBitmap = false;
 let bitInd = 0;
 
 let shiftBitmapY = (bitmapRows, yOffset) => {
-    if (yOffset === 0) return bitmapRows.slice(0, 8);
+    if (yOffset === 0) return bitmapRows.slice(0, 16);
 
     let newBitmap = bitmapRows.slice();
 
     if (yOffset < 0) {
-        const padTop = Array(Math.min(-yOffset, 8)).fill(Array(8).fill(0));
+        const padTop = Array(Math.min(-yOffset, 16)).fill(Array(8).fill(0));
         newBitmap = padTop.concat(newBitmap);
     } else {
-        const padBottom = Array(Math.min(yOffset, 8)).fill(Array(8).fill(0));
+        const padBottom = Array(Math.min(yOffset, 16)).fill(Array(8).fill(0));
         newBitmap = newBitmap.concat(padBottom);
     }
-    return newBitmap.slice(0, 8);
+    return newBitmap.slice(0, 16);
 }
 
 let padStartArray = (arr, targetLength, padValue = 0) => {
@@ -44,11 +45,12 @@ fontFile.split('\n').forEach(x => {
     }
     if (x.startsWith('BITMAP')) {
         isBitmap = true;
-        currFont.bitmap = Array(8).fill(Array(8).fill(0));
+        currFont.bitmap = Array(16).fill(Array(8).fill(0));
     }
     if (x.startsWith('BBX')) {
         let [_, w, h, xoff, yoff] = x.split(' ').map(Number);
-        currFont.bbx = { width: w, height: h, xoff: xoff, yoff: yoff };
+        currFont.bbx = { width: w, height: h, xoff, yoff };
+        currFont.bbx.yoff += 16 - h;
     }
     if (x.startsWith('ENDCHAR')) {
         currFont.bitmap = shiftBitmapY(currFont.bitmap, currFont.bbx.yoff)
@@ -56,11 +58,6 @@ fontFile.split('\n').forEach(x => {
         currFont = {};
         isBitmap = false;
         bitInd = 0;
-    }
-    if (x.startsWith('BBX')) {
-        let [_, w, h, xoff, yoff] = x.split(' ').map(Number);
-        currFont.bbx = { width: w, height: h, xoff, yoff };
-        currFont.bbx.yoff += 8 - h;
     }
     if (isBitmap && x !== 'BITMAP') {
         let val = parseInt(x, 16);
@@ -126,16 +123,18 @@ let registers = Array(32).fill().map(_ => counter());
 let memSize = 9000; // 9000 * 4 = 36 KB of mem
 let memory = Array(memSize).fill().map(x => counter());
 
-// "Hello, World"
-memory[4096].set(1819043144);
-memory[4097].set(1461726319);
-memory[4098].set(1684828783);
-memory[4099].set(10);
+// "Hello, World!!!"
+memory[4096].set(825514779);
+memory[4097].set(1818577005);
+memory[4098].set(539783020);
+memory[4099].set(1819438935);
+memory[4100].set(555819364);
 
 // stack range: 0x00008CA0 - 0x000084A0
 registers[2].set((memSize - 1) * 4);
 
 let onUARTWrite = trigger_function(() => { });
+let resetExtension;
 
 let execute = trigger_function(() => {
     let signBit = counter();
@@ -397,13 +396,15 @@ let execute = trigger_function(() => {
         }));
     });
 
+    resetExtension = resetTriggers;
+
     compare(opcode, EQ, 0b0010011, trigger_function(() => {
         binary.convert(rd, (val) => {
             rdTriggerGroup.move(-val * 20, 0);
-        }, true, 5);
+        }, false, 5);
         binary.convert(rs1, (val) => {
             rs1TriggerGroup.move(-val * 20, 0);
-        }, true, 5);
+        }, false, 5);
         // addi
         compare(funct3, EQ, 0x0, trigger_function(() => {
             rs1TriggerGroup.move(0, 30);
@@ -777,7 +778,7 @@ let execute = trigger_function(() => {
                 lbTriggerGroup.move(-val * 20, 0);
             }, false, 15);
             lbTriggerGroup.move(0, 70);
-            lbTriggerGroup.move(0, -70, .05);
+            lbTriggerGroup.move(0, -70, .035);
             tempMem.set(binary.bitwise(tempMem, RSHIFT, byteOffset, false));
             tempMem.set(binary.bitwise(tempMem, AND, 0xFF, false));
             tempRs1.set(tempMem);
@@ -1008,16 +1009,16 @@ let exec_loop = trigger_function(() => {
     igroup.move(0, 20);
     igroup.move(0, -20, .025);
     execute.call();
-    wait(0.15); // 1.075
-    binary.convert(pc, (val) => {
-        igroup.move(-val * 10, 0);
-    }, false, 16);
-    compare(pc, LESS, instructions.length * 4, trigger_function(() => {
-        compare(running, EQ, 1, trigger_function(() => old.call()));
-    }), trigger_function(() => {
-        end(true, false, true);
-        console.log($.trigger_fn_context());
-    }));
+    $.extend_trigger_func(resetExtension, () => {
+        binary.convert(pc, (val) => {
+            igroup.move(-val * 10, 0);
+        }, false, 16);
+        compare(pc, LESS, instructions.length * 4, trigger_function(() => {
+            compare(running, EQ, 1, trigger_function(() => old.call()));
+        }), trigger_function(() => {
+            end(true, false, true);
+        }));
+    });
 });
 
 pc.display(345, 75);
@@ -1045,6 +1046,13 @@ frame_loop(trigger_function(() => {
 exec_loop.call();
 
 // back to char printing
+let bgParticle = unknown_g();
+let bgColor = unknown_c();
+let fgColor = unknown_c();
+
+bgColor.set(rgb(0, 0, 0));
+fgColor.set(rgb(173, 170, 173));
+
 let particle = unknown_g();
 particle_system({
     MAX_PARTICLES: 1,
@@ -1054,24 +1062,26 @@ particle_system({
     START_SIZE: 30,
     END_SIZE: 30,
     FREE_RELATIVE_GROUPED: 2,
-    START_R: 1, START_G: 1, START_B: 1, START_A: 1,
-    END_R: 1, END_G: 1, END_B: 1, END_A: 1
-}).with(obj_props.GROUPS, particle).with(obj_props.HIDE, true).add();
+    START_A: 1,
+    END_A: 1
+}, true).with(obj_props.GROUPS, particle).with(obj_props.COLOR, fgColor).with(obj_props.HIDE, true).add();
 
-let gridGroups = Array(8).fill(Array(8).fill(0)).map(x => x.map(_ => unknown_g()));
-let dotGroups = Array(8).fill(Array(8).fill(0)).map(x => x.map(_ => unknown_g()));
+let gridGroups = Array(16).fill(Array(8).fill(0)).map(x => x.map(_ => unknown_g()));
+let dotGroups = Array(16).fill(Array(8).fill(0)).map(x => x.map(_ => unknown_g()));
 let spawnChar = unknown_g();
+let cursorGroup = unknown_g();
 
-let charSize = 0.0625;
-
-for (let y = 0; y < 8; y++) {
+let charSize = 0.0625 / 3;
+let [avgX, avgY] = [0, 0];
+let avgTerms = 0;
+for (let y = 0; y < 16; y++) {
     for (let x = 0; x < 8; x++) {
         $.add(object({
             OBJ_ID: 3608,
             TARGET: particle,
             TARGET_POS: dotGroups[y][x],
             X: ((x * charSize) * 30),
-            Y: ((8 - y) * charSize * 30),
+            Y: ((16 - y) * charSize * 30),
             SCALING: charSize,
             GROUPS: gridGroups[y][x],
             SPAWN_TRIGGERED: true,
@@ -1081,18 +1091,58 @@ for (let y = 0; y < 8; y++) {
         object({
             OBJ_ID: 3802,
             GROUPS: [dotGroups[y][x], spawnChar],
-            X: 225 + ((x * charSize) * 30),
-            Y: 180 + ((8 - y) * charSize * 30),
+            X: 105 + ((x * charSize) * 30),
+            Y: 585 + ((16 - y) * charSize * 30),
             SCALING: charSize,
             HIDE: true
         }).add();
+        avgTerms++;
+        avgX += 105 + ((x * charSize) * 30);
+        avgY += 585 + ((16 - y) * charSize * 30);
     }
 };
+avgX /= avgTerms; avgY /= avgTerms;
+
+$.add(object({
+    OBJ_ID: 211,
+    X: avgX + 1,
+    Y: avgY,
+    SCALE_X: charSize * 8,
+    SCALE_Y: charSize * 16,
+    COLOR: fgColor,
+    GROUPS: cursorGroup
+}));
+
+let textReset = counter();
 
 let character = counter();
 let ascii = fonts.slice(0, 191);
 
+textReset.display(15, 15)
+
+particle_system({
+    MAX_PARTICLES: 1,
+    DURATION: -1,
+    LIFETIME: 9999,
+    EMISSION: -1,
+    START_SIZE: 30,
+    END_SIZE: 30,
+    FREE_RELATIVE_GROUPED: 2,
+    START_A: 1,
+    END_A: 1
+}, true).with(obj_props.GROUPS, bgParticle).with(obj_props.COLOR, bgColor).with(obj_props.HIDE, true).add();
+
+// draws characters & parses ANSI codes (still very much WIP!!!!)
 let drawChar = trigger_function(() => {
+    // foreground
+    gridGroups.forEach(x => {
+        x.forEach(pix => {
+            pix.remap([particle, bgParticle]).call();
+            pix.remap();
+        });
+    });
+    wait(.01);
+    // char draw
     ascii.forEach(char => {
         compare(character, EQ, char.charCode, trigger_function(() => {
             char.bitmap.forEach((x, yi) => {
@@ -1100,16 +1150,119 @@ let drawChar = trigger_function(() => {
                     if (y) gridGroups[yi][xi].call()
                 });
             })
+
+            textReset.add(1);
         }));
     })
+    compare(character, EQ, 10, trigger_function(() => {
+        binary.convert(textReset, (val) => {
+            spawnChar.move(-(val * (8 * charSize * 10)), 0);
+            cursorGroup.move(-(val * (8 * charSize * 10)), 0);
+        }, true, 8);
+        spawnChar.move(-(8 * charSize * 10), -(16 * charSize * 10));
+        cursorGroup.move(-(8 * charSize * 10), -(16 * charSize * 10));
+        textReset.reset();
+    }));
 })
+
+let waitForANSI = counter(1);
+let isANSI = counter(1);
+let noDisplay = counter(1);
+let opANSI = counter(0);
+
+waitForANSI.display(45, 45);
+isANSI.display(45, 75);
+noDisplay.display(45, 105);
+opANSI.display(45, 135);
+
+// handles ANSI codes
+let handleANSI = trigger_function(() => {
+    compare(opANSI, EQ, 41, trigger_function(() => {
+        bgColor.set(rgb(128, 0, 0));
+    }));
+    compare(opANSI, EQ, 101, trigger_function(() => {
+        bgColor.set(rgb(255, 85, 85));
+    }));
+});
 
 // draws text when UART is updated
 $.extend_trigger_func(onUARTWrite, () => {
     character.set(uart);
-    drawChar.call();
-    spawnChar.move(8 * charSize * 10, 0);
+    // ANSI parsing first
+    // tries capturing ANSI escape codes
+    compare(uart, EQ, 27, trigger_function(() => {
+        wait(.01);
+        waitForANSI.set(0);
+        wait(.01);
+        noDisplay.set(0);
+    }));
+    // if it reaches [
+    compare(uart, EQ, 91, trigger_function(() => {
+        compare(waitForANSI, EQ, 0, trigger_function(() => {
+            wait(.01);
+            isANSI.set(0);
+            wait(.01);
+            noDisplay.set(0);
+        }));
+    }), trigger_function(() => {
+        compare(waitForANSI, EQ, 0, trigger_function(() => {
+            wait(.01);
+            waitForANSI.set(1);
+            wait(.01);
+            noDisplay.set(1);
+        }));
+    }));
+    wait(.01);
+    compare(isANSI, EQ, 0, trigger_function(() => {
+        compare(waitForANSI, EQ, 1, trigger_function(() => {
+            // handle numbers, semicolons & exits
+            // less than 58 = number
+            compare(uart, LESS, 58, trigger_function(() => {
+                let digit = counter().set(uart);
+                digit.subtract(48); // subtracts ASCII char code of number 0
+                wait(.01);
+                opANSI.multiply(10).add(digit);
+            }))
+            // ;
+            compare(uart, EQ, 59, trigger_function(() => {
+                // handle ANSI code
+                handleANSI.call();
+                wait(.01);
+                opANSI.set(0);
+            }));
+            // m (exit)
+            compare(uart, EQ, 109, trigger_function(() => {
+                handleANSI.call();
+                wait(.01);
+                isANSI.set(1);
+                wait(.01);
+                opANSI.set(0);
+                wait(.01);
+                noDisplay.set(1);
+            }));
+        }), trigger_function(() => {
+            wait(.01);
+            waitForANSI.set(1);
+            console.log($.trigger_fn_context());
+        }));
+    }));
+    wait(.01);
+    compare(noDisplay, EQ, 1, trigger_function(() => {
+        drawChar.call();
+        wait(.01);
+        spawnChar.move(8 * charSize * 10, 0);
+        cursorGroup.move(8 * charSize * 10, 0);
+    }));
 });
+
+// cursor blink
+trigger_function(() => {
+    let old = $.trigger_fn_context();
+    cursorGroup.toggle_off();
+    wait(0.84); // VGA blink rate
+    cursorGroup.toggle_on();
+    old.call(0.84);
+}).call();
 
 for (let i = 0; i < instructions.length; i++) {
     object({
